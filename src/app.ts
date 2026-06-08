@@ -17,6 +17,8 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 
 import documentRoutes from './routes/documentRoutes';
+import analyticsRoutes from './routes/analyticsRoutes';
+import recommendationRoutes from './routes/recommendationRoutes';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
 const app: Application = express();
@@ -72,7 +74,8 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // All document API routes are prefixed with /api/documents
 app.use('/api/documents', documentRoutes);
-
+app.use('/api/analytics', analyticsRoutes)
+app.use('/api/recommendations', recommendationRoutes);
 // Health check endpoint — useful for monitoring / deployment checks
 app.get('/api/health', (_req, res) => {
   res.json({
