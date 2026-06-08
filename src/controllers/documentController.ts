@@ -18,6 +18,49 @@ import { DocumentModel } from '../models/Document';
 import { upsertVector, searchSimilarVectors, deleteVector } from '../services/pineconeService';
 import { generateEmbedding, generateDocumentEmbedding } from '../services/embeddingService';
 import { AddDocumentBody, SearchQuery } from '../types';
+import { recordSearch, getTopSearches, getSearchTrends } from '../services/analyticsService';
+import { trackActivity } from '../services/recommendationService';
+import { Pinecone, RecordMetadata } from '@pinecone-database/pinecone';
+
+
+// Singleton Pinecone client — create once, reuse across requests
+let pineconeClient: Pinecone | null = null;
+
+// ============================================================
+// getPineconeClient()
+// Creates and returns the Pinecone client (singleton pattern).
+// Reads API key from environment variables.
+// ============================================================
+const getPineconeClient = (): Pinecone => {
+  if (pineconeClient) return pineconeClient;
+
+  const apiKey = process.env.PINECONE_API_KEY;
+  if (!apiKey) {
+    throw new Error('PINECONE_API_KEY is not defined in environment variables');
+  }
+
+  // Initialize Pinecone client with your API key
+  pineconeClient = new Pinecone({ apiKey });
+  return pineconeClient;
+};
+
+// ============================================================
+// getIndex()
+// Gets a reference to our Pinecone index.
+// An "index" in Pinecone = a "collection" in MongoDB.
+// It's where all our vectors live.
+// ============================================================
+const getIndex = () => {
+  const client = getPineconeClient();
+  console.log("client", client);
+  const indexName = process.env.PINECONE_INDEX_NAME || 'smart-doc-search';
+  // This does NOT make a network call — just creates a reference object
+  console.log("indexName", indexName);
+  return client.index(indexName);
+};
+
+
+
 
 // ============================================================
 // addDocument
@@ -49,7 +92,7 @@ export const addDocument = async (
       tags: tags || [],
       author,
     });
-console.log("document", document);
+    console.log("document", document);
     const mongoId = document._id.toString();
     console.log("mongoId", mongoId);
     console.log(`📄 Document saved to MongoDB: ${mongoId}`);
@@ -120,10 +163,16 @@ export const searchDocuments = async (
     // --- STEP 1: Convert search text to a vector ---
     // Same model as document indexing → comparable vectors
     const queryVector = await generateEmbedding(q.trim());
-console.log("queryVector", queryVector);
+    console.log("queryVector", queryVector);
     // --- STEP 2: Find similar vectors in Pinecone ---
     // Returns docs sorted by cosine similarity (most similar first)
     const results = await searchSimilarVectors(queryVector, topK, category);
+
+    // ↓ ADD THESE 2 LINES — record the search after results are fetched
+    // async, no await — don't make user wait for analytics to save
+    const userId = req.headers['x-user-id'] as string || 'anonymous';
+    trackActivity(userId, 'search', { query: q, vector: queryVector });
+    recordSearch(q, results.length);
 
     const searchTimeMs = Date.now() - startTime;
     console.log(`✅ Found ${results.length} results in ${searchTimeMs}ms`);
@@ -194,6 +243,19 @@ export const getDocumentById = async (req: Request, res: Response): Promise<void
       res.status(404).json({ success: false, message: 'Document not found' });
       return;
     }
+    // Track that this user viewed this document
+    const userId = req.headers['x-user-id'] as string || 'anonymous';
+
+    // Fetch the vector from Pinecone so we can cache it in activity
+    const index = getIndex();
+    const fetched = await index.fetch([req.params.id]);
+    const vector = fetched.records[req.params.id]?.values;
+
+    trackActivity(userId, 'view', {
+      documentId: req.params.id,
+      documentTitle: document.title,
+      vector,
+    });
 
     res.json({ success: true, document });
   } catch (error) {
@@ -250,3 +312,43 @@ export const getCategories = async (req: Request, res: Response): Promise<void> 
     res.status(500).json({ success: false, message: 'Failed to fetch categories' });
   }
 };
+
+
+// ============================================================
+// NEW CONTROLLER — getTopSearches
+// GET /api/analytics/top?limit=10
+// ============================================================
+export const getTopSearchesController = async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string, 10) || 10;
+    const topSearches = await getTopSearches(limit);
+
+    res.json({
+      success: true,
+      data: topSearches,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch analytics' });
+  }
+};
+
+// ============================================================
+// NEW CONTROLLER — getSearchTrends
+// GET /api/analytics/trends?days=7&limit=10
+// ============================================================
+export const getSearchTrendsController = async (req: Request, res: Response) => {
+  try {
+    const days = parseInt(req.query.days as string, 10) || 7;
+    const limit = parseInt(req.query.limit as string, 10) || 10;
+    const trends = await getSearchTrends(days, limit);
+
+    res.json({
+      success: true,
+      period: `Last ${days} days`,
+      data: trends,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch trends' });
+  }
+};
+
